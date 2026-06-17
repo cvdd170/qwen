@@ -1,0 +1,145 @@
+import torch
+from transformers import AutoProcessor, AutoModelForCausalLM
+
+MODEL = None
+PROCESSOR = None
+CURRENT_MODEL_PATH = None
+
+
+def load_model(model_path):
+    global MODEL, PROCESSOR, CURRENT_MODEL_PATH
+    if MODEL is not None and CURRENT_MODEL_PATH == model_path:
+        return PROCESSOR, MODEL
+
+    import os
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"模型路径不存在: {model_path}")
+
+    print(f"[GemmaPrompt] 正在加载模型: {model_path}")
+    PROCESSOR = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    MODEL = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        dtype="auto",
+        device_map="auto",
+        trust_remote_code=True,
+    )
+    CURRENT_MODEL_PATH = model_path
+    print("[GemmaPrompt] 模型加载完成!")
+    return PROCESSOR, MODEL
+
+
+class GemmaPromptGenerator:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model_path": ("STRING", {
+                    "default": "d:\\zh\\gemma",
+                    "multiline": False,
+                }),
+                "template_prompt": ("STRING", {
+                    "default": "请根据以下用户需求，生成一个高质量的AI绘画提示词。\n要求：\n1. 提示词要详细描述画面内容、风格、光线、构图\n2. 使用英文输出（Stable Diffusion格式）\n3. 包含质量标签如 masterpiece, best quality 等\n\n用户需求：{user_input}",
+                    "multiline": True,
+                }),
+                "user_prompt": ("STRING", {
+                    "default": "一只在月光下奔跑的白色狐狸",
+                    "multiline": True,
+                }),
+                "language": (["中文", "English"], {
+                    "default": "中文",
+                }),
+                "enable_thinking": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "开启思考",
+                    "label_off": "关闭思考",
+                }),
+                "max_new_tokens": ("INT", {
+                    "default": 1024,
+                    "min": 64,
+                    "max": 4096,
+                    "step": 64,
+                }),
+                "temperature": ("FLOAT", {
+                    "default": 0.7,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.05,
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("generated_prompt",)
+    FUNCTION = "generate"
+    CATEGORY = "GemmaPrompt"
+
+    def generate(self, model_path, template_prompt, user_prompt, language,
+                 enable_thinking, max_new_tokens, temperature):
+        if not template_prompt.strip():
+            return ("错误: 模板提示词不能为空",)
+        if not user_prompt.strip():
+            return ("错误: 用户提示词不能为空",)
+
+        processor, model = load_model(model_path)
+
+        if language == "中文":
+            lang_instruction = "请用中文输出。"
+        else:
+            lang_instruction = "Please output in English."
+
+        system_content = (
+            f"你是一个专业的提示词生成助手。\n"
+            f"请严格按照以下模板格式来生成提示词：\n\n"
+            f"---模板开始---\n{template_prompt}\n---模板结束---\n\n"
+            f"将模板中的 {{user_input}} 替换为用户的具体需求来生成最终提示词。\n"
+            f"{lang_instruction}\n"
+            f"只输出最终生成的提示词，不要输出任何解释或其他内容。"
+        )
+
+        messages = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": system_content}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": user_prompt}],
+            },
+        ]
+
+        try:
+            text = processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+            )
+            inputs = processor(text=text, return_tensors="pt").to(model.device)
+            input_len = inputs["input_ids"].shape[-1]
+
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    do_sample=True if temperature > 0 else False,
+                )
+
+            response = processor.decode(
+                outputs[0][input_len:], skip_special_tokens=False
+            )
+            parsed = processor.parse_response(response)
+
+            return (parsed.strip(),)
+
+        except Exception as e:
+            return (f"生成失败: {str(e)}",)
+
+
+NODE_CLASS_MAPPINGS = {
+    "GemmaPromptGenerator": GemmaPromptGenerator,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "GemmaPromptGenerator": "Gemma Prompt Generator",
+}

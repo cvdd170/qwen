@@ -1,0 +1,1 @@
+# 使用 ComfyUI 主环境现有依赖，禁止自动升级 transformers 和 torch
